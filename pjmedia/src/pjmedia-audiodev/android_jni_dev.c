@@ -170,7 +170,7 @@ static int AndroidRecorderCallback(void *userData)
     stop_method = (*jni_env)->GetMethodID(jni_env, stream->record_class,
                                           "stop", "()V");
     set_method = (*jni_env)->GetMethodID(jni_env, stream->record_class,
-                                         "setPreferredDevice", "(Landroid.media.AudioDeviceInfo;)Z");
+                                         "setPreferredDevice", "(Landroid/media/AudioDeviceInfo;)Z");
     if (read_method == 0 || record_method == 0 || stop_method == 0 || set_method == 0)
     {
         PJ_LOG(3, (THIS_FILE, "Unable to get recording methods"));
@@ -185,23 +185,14 @@ static int AndroidRecorderCallback(void *userData)
         goto on_return;
     }
 
-    /**
-     * What to do in Java:
-     * AudioManager am;
-     * if(stream.param.input_route & PJMEDIA_AUD_DEV_ROUTE_BLUETOOTH){
-     *      AudioDeviceInfo[] devices = am.getDevices(GET_DEVICES_INPUTS); // 1
-     *      for(AudioDeviceInfo device : devices){
-     *          int type = device.getType();
-     *          if(type == AudioDeviceInfo.TYPE_BLE_HEADSET ||
-     *          type == AudioDeviceInfo.TYPE_BLUETOOTH_SCO){
-     *              stream.record.setPreferredDevice(device);
-     *              break;
-     *          }
-     *      }
-     * }
-     */
     if (stream->param.input_route & PJMEDIA_AUD_DEV_ROUTE_BLUETOOTH)
     {
+        PJ_LOG(4, (THIS_FILE, "Setting input route (Bluetooth)"));
+
+        jclass versionClass = (*jni_env)->FindClass(jni_env, "android/os/Build$VERSION");
+        jfieldID sdkIntField = (*jni_env)->GetStaticFieldID(jni_env, versionClass, "SDK_INT", "I");
+        jint sdkInt = (*jni_env)->GetStaticIntField(jni_env, versionClass, sdkIntField);
+
         /* Get Context */
         jobject context;
         jclass contextClass;
@@ -210,7 +201,6 @@ static int AndroidRecorderCallback(void *userData)
             jmethodID currentActivityThread;
             jobject activity;
             jmethodID getApplication;
-            jobject ctx;
 
             activityThread = (*jni_env)->FindClass(jni_env, "android/app/ActivityThread");
             currentActivityThread =
@@ -248,47 +238,104 @@ static int AndroidRecorderCallback(void *userData)
             audioManagerClass = (*jni_env)->FindClass(jni_env, "android/media/AudioManager");
         }
         /* Get devices */
-        jobjectArray devices;
-        jsize devicesLength;
+        jobjectArray inputDevices, outputDevices;
+        jsize inputDevicesLength, outputDevicesLength;
         jclass audioDeviceInfoClass;
         jmethodID getType;
-        jint TYPE_BLE_HEADSET, TYPE_BLUETOOTH_SCO;
+        jint TYPE_BLE_HEADSET = 0, TYPE_BLUETOOTH_SCO;
         {
             jmethodID getDevices;
-            jfieldID flagInputField, TYPE_BLE_HEADSET_FIELD, TYPE_BLUETOOTH_SCO_FIELD;
-            jint flagInput;
+            jfieldID flagInputField, flagOutputField, TYPE_BLE_HEADSET_FIELD, TYPE_BLUETOOTH_SCO_FIELD;
+            jint flagInput, flagOutput;
             flagInputField = (*jni_env)->GetStaticFieldID(jni_env, audioManagerClass, "GET_DEVICES_INPUTS",
                                                           "I");
             flagInput = (jint)(*jni_env)->GetStaticIntField(jni_env, audioManagerClass,
                                                             flagInputField);
+            flagOutputField = (*jni_env)->GetStaticFieldID(jni_env, audioManagerClass, "GET_DEVICES_OUTPUTS",
+                                                           "I");
+            flagOutput = (jint)(*jni_env)->GetStaticIntField(jni_env, audioManagerClass,
+                                                             flagOutputField);
             getDevices = (*jni_env)->GetMethodID(jni_env, audioManagerClass, "getDevices",
                                                  "(I)[Landroid/media/AudioDeviceInfo;");
-            devices = (jobjectArray)(*jni_env)->CallObjectMethod(jni_env, audioManager,
-                                                                 getDevices, flagInput);
-            devicesLength = (*jni_env)->GetArrayLength(jni_env, devices);
+            inputDevices = (jobjectArray)(*jni_env)->CallObjectMethod(jni_env, audioManager,
+                                                                      getDevices, flagInput);
+            inputDevicesLength = (*jni_env)->GetArrayLength(jni_env, inputDevices);
+            outputDevices = (jobjectArray)(*jni_env)->CallObjectMethod(jni_env, audioManager,
+                                                                       getDevices, flagOutput);
+            outputDevicesLength = (*jni_env)->GetArrayLength(jni_env, outputDevices);
             audioDeviceInfoClass = (*jni_env)->FindClass(jni_env, "android/media/AudioDeviceInfo");
             getType =
                 (*jni_env)->GetMethodID(jni_env, audioDeviceInfoClass, "getType",
                                         "()I");
-            TYPE_BLE_HEADSET_FIELD = (*jni_env)->GetStaticFieldID(jni_env, audioDeviceInfoClass, "TYPE_BLE_HEADSET",
-                                                                  "I");
-            TYPE_BLE_HEADSET = (jint)(*jni_env)->GetStaticIntField(jni_env, audioDeviceInfoClass,
-                                                                   TYPE_BLE_HEADSET_FIELD);
+            if (sdkInt >= 31)
+            {
+                TYPE_BLE_HEADSET_FIELD = (*jni_env)->GetStaticFieldID(jni_env, audioDeviceInfoClass, "TYPE_BLE_HEADSET",
+                                                                      "I");
+                TYPE_BLE_HEADSET = (jint)(*jni_env)->GetStaticIntField(jni_env, audioDeviceInfoClass,
+                                                                       TYPE_BLE_HEADSET_FIELD);
+            }
             TYPE_BLUETOOTH_SCO_FIELD = (*jni_env)->GetStaticFieldID(jni_env, audioDeviceInfoClass, "TYPE_BLUETOOTH_SCO",
                                                                     "I");
             TYPE_BLUETOOTH_SCO = (jint)(*jni_env)->GetStaticIntField(jni_env, audioDeviceInfoClass,
                                                                      TYPE_BLUETOOTH_SCO_FIELD);
         }
-        /* Iterate devices */
-        for (jsize i = 0; i < devices; i++)
+
+        PJ_LOG(4, (THIS_FILE, "%d Input Devices %d Output Devices", inputDevicesLength, outputDevicesLength));
+
+        if (sdkInt >= 31)
         {
-            jobject device = (*jni_env)->GetObjectArrayElement(jni_env, devices, i);
+            for (jsize i = 0; i < outputDevicesLength; i++)
+            {
+                jobject device = (*jni_env)->GetObjectArrayElement(jni_env, outputDevices, i);
+                jint type = (*jni_env)->CallIntMethod(jni_env, device,
+                                                      getType);
+                PJ_LOG(4, (THIS_FILE, "Output Device #%d: Type:%d", i, type));
+                if (type == TYPE_BLE_HEADSET || type == TYPE_BLUETOOTH_SCO)
+                {
+                    jmethodID setCommunicationDevice;
+                    setCommunicationDevice = (*jni_env)->GetMethodID(jni_env, audioManagerClass, "setCommunicationDevice",
+                                                                     "(Landroid/media/AudioDeviceInfo;)Z");
+                    (*jni_env)->CallBooleanMethod(jni_env, audioManager, setCommunicationDevice, device);
+                    jthrowable exc = (*jni_env)->ExceptionOccurred(jni_env);
+                    if (exc)
+                    {
+                        (*jni_env)->ExceptionDescribe(jni_env);
+                        (*jni_env)->ExceptionClear(jni_env);
+                        PJ_LOG(3, (THIS_FILE, "setCommunicationDevice failed"));
+                    }
+                }
+            }
+        }
+        else
+        {
+            jmethodID startBluetoothSco, setBluetoothScoOn;
+            startBluetoothSco = (*jni_env)->GetMethodID(jni_env, audioManagerClass, "startBluetoothSco",
+                                                        "()V");
+            setBluetoothScoOn = (*jni_env)->GetMethodID(jni_env, audioManagerClass, "setBluetoothScoOn",
+                                                        "(Z)V");
+            (*jni_env)->CallVoidMethod(jni_env, audioManager,
+                                       startBluetoothSco);
+            (*jni_env)->CallVoidMethod(jni_env, audioManager,
+                                       setBluetoothScoOn, (jboolean)JNI_TRUE);
+        }
+        /* Iterate devices */
+        for (jsize i = 0; i < inputDevicesLength; i++)
+        {
+            jobject device = (*jni_env)->GetObjectArrayElement(jni_env, inputDevices, i);
             jint type = (*jni_env)->CallIntMethod(jni_env, device,
                                                   getType);
+
+            PJ_LOG(4, (THIS_FILE, "Input Device #%d: Type:%d", i, type));
             if (type == TYPE_BLE_HEADSET || type == TYPE_BLUETOOTH_SCO)
             {
-                (*jni_env)->CallBooleanMethod(jni_env, stream->record, set_method, device);
-                break;
+                if ((*jni_env)->CallBooleanMethod(jni_env, stream->record, set_method, device))
+                {
+                    break;
+                }
+                else
+                {
+                    PJ_LOG(3, (THIS_FILE, "setCommunicationDevice failed"));
+                }
             }
         }
     }
